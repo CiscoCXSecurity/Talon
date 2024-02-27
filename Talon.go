@@ -54,6 +54,7 @@ type FlagOptions struct {
 	user     string
 	userfile string
 	passfile string
+	combofile string
 	lockout  float64
 	attempts float64
 	domain   string
@@ -81,6 +82,7 @@ func options() *FlagOptions {
 	user := flag.String("U", "", "Username to authenticate as")
 	userfile := flag.String("Userfile", "", "File containing the list of usernames")
 	passfile := flag.String("Passfile", "", "File containing the list of passwords")
+	combofile := flag.String("Combofile", "", "File containing list of user:pass combinations to try")
 	lockout := flag.Float64("Lockout", 60, "Account lockout period in minutes")
 	attempts := flag.Float64("A", 3, "Authentication attempts per lockout period")
 	pass := flag.String("P", "", "Password to use")
@@ -94,7 +96,7 @@ func options() *FlagOptions {
 	flag.Parse()
 	debugging = *debug
 	debugWriter = os.Stdout
-	return &FlagOptions{host: *host, domain: *domain, user: *user, userfile: *userfile, hostfile: *hostfile, pass: *pass, outFile: *outFile, sleep: *sleep, enum: *enum, ldap: *ldap, kerb: *kerb, passfile: *passfile, lockout: *lockout, attempts: *attempts, lockerr: *lockerr}
+	return &FlagOptions{host: *host, domain: *domain, user: *user, userfile: *userfile, combofile: *combofile, hostfile: *hostfile, pass: *pass, outFile: *outFile, sleep: *sleep, enum: *enum, ldap: *ldap, kerb: *kerb, passfile: *passfile, lockout: *lockout, attempts: *attempts, lockerr: *lockerr}
 }
 
 func readfile(inputFile string) []string {
@@ -102,7 +104,9 @@ func readfile(inputFile string) []string {
 	if err != nil {
 		log.Fatal(err)
 	}
-	return strings.Split(string(output), "\n")
+	return strings.FieldsFunc(string(output), func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
 }
 
 func check(e error) {
@@ -126,6 +130,7 @@ func main() {
 	var usernames []string
 	var services []string
 	var passwords []string
+	var combos []string
 	services = []string{"KERB", "LDAP"}
 	fmt.Println(`
   __________  ________  ___       ________  ________
@@ -137,7 +142,7 @@ func main() {
           \|__|  \|__|\|__|\|_______|\|_______|\|__| \|__|
 					          (@Tyl0us)
 
-	Version: 3.2							`)
+	Version: 3.2-mod1							`)
 
 	if opt.enum {
 		services = []string{"KERB"}
@@ -190,12 +195,20 @@ func main() {
 		}
 	}
 
-	if opt.user == "" && opt.userfile == "" {
-		log.Fatal("Error: Please provide an username or list of usernames")
+	if opt.user == "" && opt.userfile == "" && opt.combofile == "" {
+		log.Fatal("Error: Please provide a username, username file or a combofile")
 	}
 
-	if (opt.pass == "" && opt.passfile == "") && opt.enum == false {
-		log.Fatal("Error: Please provide a password or select the enumeration option")
+	if (opt.pass == "" && opt.passfile == "") && opt.enum == false && opt.combofile == "" {
+		log.Fatal("Error: Please provide a password, select the enumeration option or provide a combofile")
+	}
+
+	if (opt.user != "" || opt.userfile != "") && opt.combofile != "" {
+		log.Fatal("Error: Don't specify username or username file with Combofile")
+	}
+
+	if (opt.pass != "" || opt.passfile != "") && opt.combofile != "" {
+		log.Fatal("Error: Don't specify password or password file with Combofile")
 	}
 
 	if opt.pass != "" {
@@ -210,6 +223,17 @@ func main() {
 		for _, user := range fileUsers {
 			if user != "" {
 				usernames = append(usernames, user)
+			}
+		}
+	}
+
+	if opt.combofile != "" {
+		printDebug("Reading combo file %s\n", opt.userfile)
+		fileCombos := readfile(opt.combofile)
+		printDebug("Appending combos %v\n", fileCombos)
+		for _, combo := range fileCombos {
+			if combo != "" {
+				combos = append(combos, combo)
 			}
 		}
 	}
@@ -232,6 +256,62 @@ func main() {
 			log.Fatal("[*] Shutting down")
 		}
 		fmt.Print("\n")
+	}
+
+	// Combo execution logic
+	if (opt.combofile != "") {
+		sleep := opt.sleep
+		domain := strings.ToUpper(opt.domain)
+		printDebug("Domain %v\tCombos %v\tHosts %v\tServices %v\n", domain, combos, hosts, services)
+		x := 0
+		err := 0
+		rand.Seed(time.Now().Unix())
+		lenServices := len(services) - 1
+		for _, combo := range combos {
+			n := 0
+			if opt.hostfile != "" {
+				n = rand.Int() % (len(hosts) - 1)
+			}
+			if hosts[n] == "" {
+				return
+			}
+
+			parts := strings.SplitN(combo, ":", 2)
+			if len(parts) != 2 {
+				fmt.Printf("[W] Ignoring combo with too many colons: %s", combo)
+				continue
+			}
+			username := parts[0]
+			password := parts[1]
+
+			time.Sleep(time.Duration(sleep) * time.Second)
+			auth := setup(services[x], hosts[n], domain, username, password, opt.enum)
+			result, forfile, _ := auth.Login()
+			fmt.Println(result)
+			if strings.Contains(result, "User's Account Locked") && opt.enum != true {
+				err++
+				if err == int(opt.lockerr) {
+					reader := bufio.NewReader(os.Stdin)
+					fmt.Printf("[*] %d Consecutive account lock out(s) detected - Do you want to continue.[y/n]: ", err)
+					text, _ := reader.ReadString('\n')
+					if strings.Contains(text, "y") {
+						err = 0
+						continue
+					}
+					log.Fatal("Shutting down")
+				}
+			}
+			if opt.outFile != "" {
+				forfile = forfile + "\n"
+				writefile(opt.outFile, forfile)
+			}
+			if lenServices == x {
+				x = 0
+			} else {
+				x++
+				err = 0
+			}
+		}
 	}
 
 	// Normal execution logic
