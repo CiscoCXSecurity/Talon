@@ -40,6 +40,8 @@ $ ./Talon -h
 Usage of ./Talon:
   -A float
     	Authentication attempts per lockout period (default 3)
+  -Combofile string
+        File containing list of user:pass combinations to try
   -D string
     	Fully qualified domain to use
   -E	Enumerates which users are valid
